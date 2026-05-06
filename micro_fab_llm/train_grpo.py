@@ -429,6 +429,7 @@ def _build_grpo_config(config: TrainConfig) -> Any:
         "per_device_train_batch_size": config.per_device_train_batch_size,
         "gradient_accumulation_steps": config.gradient_accumulation_steps,
         "learning_rate": config.learning_rate,
+        "optim": "adamw_8bit",
         "warmup_ratio": config.warmup_ratio,
         "weight_decay": config.weight_decay,
         "lr_scheduler_type": config.lr_scheduler_type,
