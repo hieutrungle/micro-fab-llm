@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "micro-fab-llm"
+version = "0.1.0"
+description = "GPU-native Micro-Fab VLM (Gemma-4-E4B)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Hieu Le" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest"
+]
+training = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["micro_fab_llm*"]
