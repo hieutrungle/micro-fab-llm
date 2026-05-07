@@ -134,3 +134,6 @@ dynamic_pricing_lora/
 
 # dataset
 dataset/
+
+# job
+jobs/
