@@ -117,9 +117,6 @@ trial_error/
 # temporary files
 **tmp*
 
-# AI agent context
-context/
-
 # temp files and folders
 temp/
 temp_*
