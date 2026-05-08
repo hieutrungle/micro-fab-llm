@@ -8,9 +8,10 @@ checkpoint, and prepares the model for high-throughput edge deployment.
 
 ## Current Focus
 
-The current focus is Phase 3: merging the trained Micro-Fab vision LoRA adapter
-and preparing a quantized deployment checkpoint. Phase 1 and Phase 2 remain in
-the repo as reproducible data generation and GRPO training steps.
+The current focus is Phase 4: serving the quantized Micro-Fab VLM through an
+asynchronous FastAPI gateway. Phase 1 through Phase 3 remain in the repo as the
+reproducible path for synthetic data generation, GRPO fine-tuning, LoRA merging,
+and deployment checkpoint preparation.
 
 Each label is JSON with a defect class and normalized YOLO bounding box:
 
@@ -178,10 +179,85 @@ python -m micro_fab_llm.quantize_vlm \
 Unsloth training stack, so use a separate deployment/quantization environment
 if pip attempts to move `torch` or `transformers`.
 
-## Roadmap
+The current Phase 4 serving gateway is configured for the native Unsloth 4-bit
+deployment folder:
 
-The remaining sprint phases focus on serving and latency validation:
+```text
+micro_fab_vlm_deployed_4bit
+```
 
-- Refactor the FastAPI gateway to accept base64 images and return JSON defect diagnostics.
-- Validate vLLM latency on a single 24GB RTX 3090 against the 50ms target.
-- Add regression tests for strict JSON output parsing and calibration sample loading.
+## Serve The Inspection API
+
+`micro_fab_llm.serve_llm` now exposes the Phase 4 factory inspection endpoint.
+It accepts a base64-encoded wafer image, decodes it into a PIL RGB image, sends
+the image and a strict `<image>` JSON prompt to vLLM, and returns the parsed
+defect classification.
+
+The server is configured for the native Unsloth 4-bit deployment folder:
+
+```text
+micro_fab_vlm_deployed_4bit
+```
+
+The vLLM engine uses `bitsandbytes` loading, `max_model_len=4096`, and
+`enforce_eager=True` to avoid CUDA graph issues with 4-bit vision models.
+
+Start the API:
+
+```bash
+python -m micro_fab_llm.serve_llm
+```
+
+Request schema:
+
+```json
+{
+  "image_base64": "<base64-encoded wafer image>"
+}
+```
+
+Response schema:
+
+```json
+{
+  "defect": "scratch",
+  "confidence": 0.98
+}
+```
+
+Example request:
+
+```bash
+python - <<'PY' > /tmp/micro_fab_inspect_payload.json
+import base64
+import json
+from pathlib import Path
+
+image_path = Path("dataset/images/wafer_0000.png")
+payload = {
+    "image_base64": base64.b64encode(image_path.read_bytes()).decode("utf-8")
+}
+print(json.dumps(payload))
+PY
+
+curl -s http://localhost:8000/inspect \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/micro_fab_inspect_payload.json | python -m json.tool
+```
+
+## Task Status
+
+Implemented in the repo:
+
+- Phase 1: synthetic wafer defect generation with JSON labels.
+- Phase 2: multimodal GRPO training path using PIL images, `<image>` prompts, and JSON reward matching.
+- Phase 3: LoRA merge and quantization/deployment preparation scripts.
+- Phase 4: asynchronous FastAPI `/inspect` endpoint for base64 image inspection through vLLM.
+
+Still to complete or validate:
+
+- Produce or verify the final `micro_fab_vlm_deployed_4bit` checkpoint in the deployment environment.
+- Run an end-to-end `/inspect` smoke test with a real synthetic wafer image and the 4-bit VLM loaded by vLLM.
+- Validate latency and throughput on the target single 24GB RTX 3090, including continuous batching behavior.
+- Add regression tests for base64 image decoding, strict JSON extraction, and malformed model output handling.
+- Add deployment notes for the factory runtime environment once the GPU validation numbers are known.

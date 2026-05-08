@@ -1,20 +1,30 @@
-"""FastAPI server for dynamic pricing inference with a merged Gemma-4 model via vLLM."""
+"""Async FastAPI server for multimodal wafer defect inspection via vLLM."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import inspect
+import io
 import json
 import logging
 import re
-from ast import literal_eval
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel
 from transformers import AutoTokenizer, CONFIG_MAPPING, PreTrainedTokenizerBase
-from vllm import LLM, SamplingParams
+import vllm
+from vllm import SamplingParams
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,31 +34,31 @@ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 @dataclass(frozen=True)
 class ServerConfig:
-    model_path: str = "/home/hieule/research/pricing_llm/tmp_gemma4-e4b-pricing-merged"
+    model_path: str = "micro_fab_vlm_deployed_4bit"
     host: str = "0.0.0.0"
     port: int = 8000
     tensor_parallel_size: int = 1
     dtype: ModelDType = "bfloat16"
+    quantization: str = "bitsandbytes"
+    load_format: str = "bitsandbytes"
     gpu_memory_utilization: float = 0.80
-    max_model_len: int = 2048
+    max_model_len: int = 4096
     enforce_eager: bool = True
     trust_remote_code: bool = False
-    max_tokens: int = 64
+    max_tokens: int = 128
     temperature: float = 0.0
     top_p: float = 1.0
 
 
 CONFIG = ServerConfig()
 
-_JSON_BLOCK_PATTERN = re.compile(r"\{[^{}]*\}", flags=re.DOTALL)
-_MULTIPLIER_PATTERN = re.compile(
-    r"[\"']?(?:multiplier|price_multiplier)[\"']?\s*[:=]\s*"
-    r"[\"']?(?P<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)[\"']?",
-    flags=re.IGNORECASE,
+_CODE_FENCE_PATTERN = re.compile(
+    r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$",
+    flags=re.DOTALL | re.IGNORECASE,
 )
 
-_GLOBAL_LLM: Optional[LLM] = None
-_GLOBAL_TOKENIZER: Optional[PreTrainedTokenizerBase] = None
+_GLOBAL_ENGINE: AsyncLLMEngine | None = None
+_GLOBAL_TOKENIZER: PreTrainedTokenizerBase | None = None
 
 
 def _setup_logging() -> None:
@@ -62,7 +72,7 @@ def _setup_logging() -> None:
 _setup_logging()
 
 
-def _read_model_type_from_config(model_path: str) -> Optional[str]:
+def _read_model_type_from_config(model_path: str) -> str | None:
     config_path = Path(model_path) / "config.json"
     if not config_path.exists():
         return None
@@ -79,28 +89,29 @@ def _read_model_type_from_config(model_path: str) -> Optional[str]:
 
 def _ensure_transformers_supports_model_type(model_path: str) -> None:
     model_type = _read_model_type_from_config(model_path)
-    if model_type is None:
-        return
-    if model_type in CONFIG_MAPPING:
+    if model_type is None or model_type in CONFIG_MAPPING:
         return
 
     raise RuntimeError(
         "Incompatible transformers version for this checkpoint. "
         f"model_type={model_type!r} is not registered in transformers CONFIG_MAPPING. "
-        "Upgrade transformers (recommended latest) in this environment, for example: "
+        "Upgrade transformers in this environment, for example: "
         "pip install --upgrade transformers"
     )
 
 
-def _get_llm() -> LLM:
-    global _GLOBAL_LLM
-    if _GLOBAL_LLM is not None:
-        return _GLOBAL_LLM
+def init_engine() -> AsyncLLMEngine:
+    """Initialize the async vLLM engine for the quantized VLM checkpoint."""
+    global _GLOBAL_ENGINE
+    if _GLOBAL_ENGINE is not None:
+        return _GLOBAL_ENGINE
 
     _ensure_transformers_supports_model_type(CONFIG.model_path)
-    LOGGER.info("Initializing vLLM model from %s", CONFIG.model_path)
-    _GLOBAL_LLM = LLM(
+    LOGGER.info("Initializing async vLLM engine from %s", CONFIG.model_path)
+    engine_args = AsyncEngineArgs(
         model=CONFIG.model_path,
+        quantization=CONFIG.quantization,
+        load_format=CONFIG.load_format,
         tensor_parallel_size=CONFIG.tensor_parallel_size,
         dtype=CONFIG.dtype,
         gpu_memory_utilization=CONFIG.gpu_memory_utilization,
@@ -108,7 +119,12 @@ def _get_llm() -> LLM:
         enforce_eager=CONFIG.enforce_eager,
         trust_remote_code=CONFIG.trust_remote_code,
     )
-    return _GLOBAL_LLM
+    _GLOBAL_ENGINE = AsyncLLMEngine.from_engine_args(engine_args)
+    return _GLOBAL_ENGINE
+
+
+def _get_engine() -> AsyncLLMEngine:
+    return init_engine()
 
 
 def _get_prompt_tokenizer() -> PreTrainedTokenizerBase:
@@ -126,44 +142,41 @@ def _get_prompt_tokenizer() -> PreTrainedTokenizerBase:
     return _GLOBAL_TOKENIZER
 
 
-class PriceRequest(BaseModel):
-    riders: float = Field(..., ge=0.0)
-    drivers: float = Field(..., ge=0.0)
-    base_price: float = Field(..., ge=0.0)
-    time: float = Field(..., ge=0.0, le=23.0)
+class InspectionRequest(BaseModel):
+    image_base64: str
 
 
-class PriceResponse(BaseModel):
-    multiplier: float
+class InspectionResponse(BaseModel):
+    defect: str
+    confidence: float | None = None
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     """Initialize vLLM after process bootstrap is complete."""
     try:
-        _get_llm()
+        init_engine()
+        _get_prompt_tokenizer()
     except Exception:
         LOGGER.exception("vLLM initialization failed during FastAPI lifespan startup")
         raise
     yield
 
 
-app = FastAPI(title="Dynamic Pricing LLM (Gemma-4-E4B)", lifespan=_lifespan)
+app = FastAPI(title="Micro-Fab VLM Inspection API", lifespan=_lifespan)
 
 
-def format_pricing_prompt(riders: float, drivers: float, base_price: float, time_of_day: float) -> str:
-    """Format a prompt consistent with the GRPO training contract."""
+def format_inspection_prompt() -> str:
+    """Format the strict JSON multimodal inspection prompt."""
     system_prompt = (
-        "You are an AI pricing agent. "
-        "Return ONLY a valid JSON object with exactly one key \"multiplier\" and a numeric value. "
-        "Do not output markdown or explanations. "
-        "When you are finished, you MUST immediately output the word 'STOP'."
+        "You are a semiconductor wafer optical inspection VLM. "
+        "Return ONLY a valid JSON object with schema "
+        "{\"defect\": string, \"confidence\": number | null}. "
+        "The defect value must be the best defect class visible in the image. "
+        "Do not output markdown, prose, comments, or extra keys. "
+        "When you are finished, immediately output the word 'STOP'."
     )
-    user_prompt = (
-        f"State: [riders: {riders:.1f}, drivers: {drivers:.1f}, "
-        f"base_price: {base_price:.1f}, time: {time_of_day:.1f}]. "
-        "What is the optimal price multiplier?"
-    )
+    user_prompt = "<image>\nClassify the defect in this wafer."
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -187,78 +200,120 @@ def format_pricing_prompt(riders: float, drivers: float, base_price: float, time
     return f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
 
 
-def parse_multiplier_from_text(text: str) -> float:
-    """Extract multiplier from model text using JSON-first parsing with regex fallback."""
-    parse_text = text.split("STOP", 1)[0]
-    parsed_multiplier: Optional[float] = None
+def _decode_base64_image(image_base64: str) -> Image.Image:
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("image_base64 is not valid base64") from error
 
-    for match in _JSON_BLOCK_PATTERN.finditer(parse_text):
-        payload = match.group(0).strip()
-        data: Any
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            try:
-                data = literal_eval(payload)
-            except (ValueError, SyntaxError):
-                continue
-        if not isinstance(data, dict):
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return image.convert("RGB")
+    except UnidentifiedImageError as error:
+        raise ValueError("image_base64 does not decode to a supported image") from error
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    cleaned = text.split("STOP", 1)[0].strip()
+    match = _CODE_FENCE_PATTERN.match(cleaned)
+    if match is not None:
+        return match.group("body").strip()
+    return cleaned
+
+
+def _extract_json_from_text(text: str) -> dict[str, Any]:
+    """Extract a JSON object after removing optional markdown code fences."""
+    cleaned = _strip_markdown_json_fence(text)
+    decoder = json.JSONDecoder()
+
+    for index, character in enumerate(cleaned):
+        if character != "{":
             continue
-        for key in ("multiplier", "price_multiplier"):
-            if key in data:
-                try:
-                    parsed_multiplier = float(data[key])
-                except (TypeError, ValueError):
-                    continue
-
-    if parsed_multiplier is not None:
-        return parsed_multiplier
-
-    regex_match: Optional[re.Match[str]] = None
-    for match in _MULTIPLIER_PATTERN.finditer(parse_text):
-        regex_match = match
-    if regex_match is not None:
         try:
-            return float(regex_match.group("value"))
+            payload, _ = decoder.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+
+    raise ValueError("Could not parse a JSON object from model output")
+
+
+def _build_vllm_input(formatted_text: str, pil_image: Image.Image) -> Any:
+    inputs_cls = getattr(vllm, "Inputs", None)
+    if inputs_cls is not None:
+        return inputs_cls(prompt=formatted_text, multi_modal_data={"image": pil_image})
+    return {"prompt": formatted_text, "multi_modal_data": {"image": pil_image}}
+
+
+async def _await_final_output(generation: Any) -> Any:
+    if inspect.isawaitable(generation):
+        return await generation
+
+    if isinstance(generation, AsyncIterator) or hasattr(generation, "__aiter__"):
+        final_output = None
+        async for output in generation:
+            final_output = output
+        return final_output
+
+    return generation
+
+
+def _parse_inspection_response(text: str) -> InspectionResponse:
+    payload = _extract_json_from_text(text)
+    defect = payload.get("defect")
+    if not isinstance(defect, str) or not defect.strip():
+        raise ValueError("Model JSON did not include a non-empty 'defect' string")
+
+    confidence: float | None = None
+    raw_confidence = payload.get("confidence")
+    if raw_confidence is not None:
+        try:
+            confidence = float(raw_confidence)
         except (TypeError, ValueError):
-            pass
+            confidence = None
 
-    raise ValueError("Could not parse a valid multiplier from model output")
+    return InspectionResponse(defect=defect.strip(), confidence=confidence)
 
 
-@app.post("/predict_price", response_model=PriceResponse)
-def predict_price(request: PriceRequest) -> PriceResponse:
-    prompt = format_pricing_prompt(
-        riders=request.riders,
-        drivers=request.drivers,
-        base_price=request.base_price,
-        time_of_day=request.time,
-    )
+@app.post("/inspect", response_model=InspectionResponse)
+async def inspect_wafer(request: InspectionRequest) -> InspectionResponse:
+    try:
+        pil_image = await asyncio.to_thread(_decode_base64_image, request.image_base64)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
+    formatted_text = format_inspection_prompt()
+    vllm_input = _build_vllm_input(formatted_text, pil_image)
     sampling_params = SamplingParams(
         max_tokens=CONFIG.max_tokens,
         temperature=CONFIG.temperature,
         top_p=CONFIG.top_p,
         stop=["STOP"],
     )
+    request_id = f"inspect-{uuid4()}"
 
     text = ""
     try:
-        outputs: List[Any] = _get_llm().generate([prompt], sampling_params)
-        if not outputs or not outputs[0].outputs:
+        results = await _await_final_output(
+            _get_engine().generate(vllm_input, sampling_params, request_id)
+        )
+        if results is None or not getattr(results, "outputs", None):
             raise HTTPException(status_code=502, detail="vLLM returned an empty completion")
-        text = outputs[0].outputs[0].text
-        multiplier = parse_multiplier_from_text(text)
+        text = results.outputs[0].text
+        return _parse_inspection_response(text)
     except HTTPException:
         raise
     except ValueError as error:
-        LOGGER.warning("Failed to parse completion into multiplier: %s | raw=%r", error, text[:500] if isinstance(text, str) else text)
+        LOGGER.warning(
+            "Failed to parse completion into inspection response: %s | raw=%r",
+            error,
+            text[:500] if isinstance(text, str) else text,
+        )
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        LOGGER.exception("Inference request failed")
-        raise HTTPException(status_code=500, detail="Inference failed") from error
-
-    return PriceResponse(multiplier=multiplier)
+        LOGGER.exception("Inspection request failed")
+        raise HTTPException(status_code=500, detail="Inspection failed") from error
 
 
 if __name__ == "__main__":
