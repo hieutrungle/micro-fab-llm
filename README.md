@@ -179,28 +179,29 @@ python -m micro_fab_llm.quantize_vlm \
 Unsloth training stack, so use a separate deployment/quantization environment
 if pip attempts to move `torch` or `transformers`.
 
-The current Phase 4 serving gateway is configured for the native Unsloth 4-bit
-deployment folder:
+The current Phase 4 serving gateway is configured for the merged 16-bit
+checkpoint:
 
 ```text
-micro_fab_vlm_deployed_4bit
+micro_fab_vlm_merged_16bit
 ```
 
 ## Serve The Inspection API
 
 `micro_fab_llm.serve_llm` now exposes the Phase 4 factory inspection endpoint.
 It accepts a base64-encoded wafer image, decodes it into a PIL RGB image, sends
-the image and a strict `<image>` JSON prompt to vLLM, and returns the parsed
-defect classification.
+the image and a strict `<image>` JSON prompt to the native Transformers
+Gemma-4 VLM runtime, and returns the parsed defect classification.
 
-The server is configured for the native Unsloth 4-bit deployment folder:
+The server is configured for the merged 16-bit checkpoint:
 
 ```text
-micro_fab_vlm_deployed_4bit
+micro_fab_vlm_merged_16bit
 ```
 
-The vLLM engine uses `bitsandbytes` loading, `max_model_len=4096`, and
-`enforce_eager=True` to avoid CUDA graph issues with 4-bit vision models.
+The merged 16-bit checkpoint currently serves through Transformers because
+vLLM 0.11 falls back to a generic multimodal Transformers wrapper that is not
+compatible with Gemma-4's per-layer input path.
 
 Start the API:
 
