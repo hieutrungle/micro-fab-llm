@@ -149,7 +149,7 @@ class InspectionRequest(BaseModel):
 
 class InspectionResponse(BaseModel):
     defect: str
-    confidence: float | None = None
+    # confidence: float | None = None
 
 
 @asynccontextmanager
@@ -169,22 +169,24 @@ app = FastAPI(title="Micro-Fab VLM Inspection API", lifespan=_lifespan)
 
 def format_inspection_prompt() -> str:
     """Format the strict JSON multimodal inspection prompt."""
-    system_prompt = (
-        "You are a semiconductor wafer optical inspection VLM. "
-        "Return ONLY a valid JSON object with schema "
-        "{\"defect\": string, \"confidence\": number | null}. "
-        "The defect value must be the best defect class visible in the image. "
-        "Do not output markdown, prose, comments, or extra keys. "
-        "When you are finished, immediately output the word 'STOP'."
-    )
-    user_prompt = "Classify the defect in this wafer."
     messages = [
-        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": user_prompt},
+                {
+                    "type": "text",
+                    "text": (
+                        "You are a semiconductor optical inspection VLM. "
+                        "Classify exactly one visible wafer defect from the allowed classes. "
+                        "Inspect the wafer image and classify the injected defect. "
+                        "The only allowed defect values are: scratch, particle, bridge_short. "
+                        "Return exactly one JSON object with this schema: "
+                        "{\"defect\": \"scratch|particle|bridge_short\"}. "
+                        "Do not include markdown, prose, coordinates, or extra keys. "
+                        "After the JSON object, immediately output STOP."
+                    ),
+                },
             ],
         },
     ]
@@ -272,15 +274,16 @@ def _parse_inspection_response(text: str) -> InspectionResponse:
     if not isinstance(defect, str) or not defect.strip():
         raise ValueError("Model JSON did not include a non-empty 'defect' string")
 
-    confidence: float | None = None
-    raw_confidence = payload.get("confidence")
-    if raw_confidence is not None:
-        try:
-            confidence = float(raw_confidence)
-        except (TypeError, ValueError):
-            confidence = None
+    # confidence: float | None = None
+    # raw_confidence = payload.get("confidence")
+    # if raw_confidence is not None:
+    #     try:
+    #         confidence = float(raw_confidence)
+    #     except (TypeError, ValueError):
+    #         confidence = None
 
-    return InspectionResponse(defect=defect.strip(), confidence=confidence)
+    return InspectionResponse(defect=defect.strip())
+    # return InspectionResponse(defect=defect.strip(), confidence=confidence)
 
 
 @app.post("/inspect", response_model=InspectionResponse)

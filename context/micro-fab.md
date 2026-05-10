@@ -10,7 +10,7 @@ The goal is to fine-tune and deploy a quantized model on a single 24GB GPU (RTX 
 
 - **Base Model:** `unsloth/gemma-4-E4B-it` (Leveraging its native multimodal/image capabilities).
 - **Training Engine:** Unsloth + `trl` (GRPO). We are replacing TorchRL continuous simulation with Ground-Truth Verification.
-- **Serving Engine:** `vLLM` (using PagedAttention and Continuous Batching) wrapped in an asynchronous `FastAPI` gateway.
+- **Serving Engine:** Native Transformers Gemma-4 VLM runtime wrapped in an asynchronous `FastAPI` gateway for the merged 16-bit checkpoint; vLLM remains the target for a later quantized deployment checkpoint.
 - **Data Processing:** OpenCV (`cv2.seamlessClone`) for synthetic defect generation, and `Pillow` for VLM image formatting.
 
 ## 3. The 1-Week Roadmap (Tasks for the Agent)
@@ -40,8 +40,14 @@ The goal is to fine-tune and deploy a quantized model on a single 24GB GPU (RTX 
 - **Target File:** `serve_llm.py`
 - **Modifications:** 1. Refactor the Pydantic schema to accept `image_base64` strings instead of numerical rider/driver states.
   2. Decode the base64 string into a PIL image.
-  3. Pass both the `<image>` prompt and the PIL image into the `vLLM` engine using `vllm.Inputs(prompt, multi_modal_data={"image": pil_image})`.
+  3. Pass both the `<image>` prompt and the PIL image into the Gemma-4 processor/model runtime.
   4. Extract and return the JSON defect classification.
+
+### Phase 5: The Stress Test
+
+- **Status:** Implemented in `tests/test_vlm_throughput.py`; run against a live server to collect final factory-load metrics.
+- **Goal:** Validate 100 concurrent `/inspect` requests using random synthetic wafer images from `dataset/images`.
+- **Metrics:** Total concurrent requests, total wall-clock time, requests per second, average latency, classification accuracy, and HTTP 200 success rate.
 
 ## 3.1 Current Task Status
 
@@ -50,13 +56,14 @@ The goal is to fine-tune and deploy a quantized model on a single 24GB GPU (RTX 
 - **Phase 1:** Synthetic wafer defect generation and JSON label output.
 - **Phase 2:** Multimodal GRPO training path with PIL images, Gemma `<image>` prompting, and ground-truth JSON reward matching.
 - **Phase 3:** LoRA merge and deployment quantization preparation scripts.
-- **Phase 4:** Async FastAPI `/inspect` endpoint that accepts base64 images, routes PIL images through vLLM multimodal input, and returns defect JSON.
+- **Phase 4:** Async FastAPI `/inspect` endpoint that accepts base64 images, routes PIL images through the Gemma-4 VLM runtime, and returns defect JSON.
+- **Phase 5:** Async load tester for 100 concurrent `/inspect` requests.
 
 ### Still to complete or validate
 
 - Produce or verify the final `micro_fab_vlm_deployed_4bit` checkpoint in the deployment environment.
 - Run an end-to-end `/inspect` smoke test with the 4-bit VLM loaded by vLLM.
-- Validate throughput and latency on the target 24GB RTX 3090.
+- Run the Phase 5 load test and record throughput and latency on the target 24GB RTX 3090.
 - Add regression tests for strict JSON parsing, base64 decoding failures, and malformed model completions.
 - Document deployment/runtime settings after GPU validation is complete.
 

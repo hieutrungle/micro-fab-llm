@@ -8,10 +8,10 @@ checkpoint, and prepares the model for high-throughput edge deployment.
 
 ## Current Focus
 
-The current focus is Phase 4: serving the quantized Micro-Fab VLM through an
-asynchronous FastAPI gateway. Phase 1 through Phase 3 remain in the repo as the
-reproducible path for synthetic data generation, GRPO fine-tuning, LoRA merging,
-and deployment checkpoint preparation.
+The current focus is Phase 5: stress testing the asynchronous FastAPI inspection
+gateway under high-throughput factory-style load. Phase 1 through Phase 4 remain
+in the repo as the reproducible path for synthetic data generation, GRPO
+fine-tuning, LoRA merging, deployment preparation, and serving.
 
 Each label is JSON with a defect class and normalized YOLO bounding box:
 
@@ -246,6 +246,39 @@ curl -s http://localhost:8000/inspect \
   --data-binary @/tmp/micro_fab_inspect_payload.json | python -m json.tool
 ```
 
+## Phase 5: Stress Test
+
+`tests/test_vlm_throughput.py` is a standalone async load tester for the
+running `/inspect` endpoint. It samples 5 random image/label pairs from
+`dataset/images` and `dataset/labels`, fires 100 concurrent `aiohttp` POST
+requests to `http://127.0.0.1:8000/inspect`, and prints total time, RPS,
+average latency, classification accuracy, and HTTP 200 success rate.
+
+Start the API in one terminal:
+
+```bash
+python -m micro_fab_llm.serve_llm
+```
+
+Run the throughput test in another terminal:
+
+```bash
+python tests/test_vlm_throughput.py
+```
+
+Expected report format:
+
+```text
+Micro-Fab VLM Throughput Report
+==================================
+Total Concurrent Requests: 100
+Total Execution Time:      12.345 seconds
+Requests Per Second (RPS): 8.100
+Average Latency/Request:   11.234 seconds
+Classification Accuracy:   98.0%
+Success Rate:              100.0%
+```
+
 ## Task Status
 
 Implemented in the repo:
@@ -253,12 +286,13 @@ Implemented in the repo:
 - Phase 1: synthetic wafer defect generation with JSON labels.
 - Phase 2: multimodal GRPO training path using PIL images, `<image>` prompts, and JSON reward matching.
 - Phase 3: LoRA merge and quantization/deployment preparation scripts.
-- Phase 4: asynchronous FastAPI `/inspect` endpoint for base64 image inspection through vLLM.
+- Phase 4: asynchronous FastAPI `/inspect` endpoint for base64 image inspection.
+- Phase 5: standalone async throughput tester for 100 concurrent `/inspect` requests.
 
 Still to complete or validate:
 
 - Produce or verify the final `micro_fab_vlm_deployed_4bit` checkpoint in the deployment environment.
 - Run an end-to-end `/inspect` smoke test with a real synthetic wafer image and the 4-bit VLM loaded by vLLM.
-- Validate latency and throughput on the target single 24GB RTX 3090, including continuous batching behavior.
+- Run the Phase 5 throughput test on the target single 24GB RTX 3090 and record the resulting RPS, latency, and success rate.
 - Add regression tests for base64 image decoding, strict JSON extraction, and malformed model output handling.
 - Add deployment notes for the factory runtime environment once the GPU validation numbers are known.
